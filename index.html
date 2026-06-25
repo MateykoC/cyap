@@ -1,793 +1,353 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CYAP — Sistema de Producción</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
-
-<script type="module">
-  import { initializeApp }         from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getFirestore, collection, onSnapshot, query, orderBy, addDoc, serverTimestamp }
-    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
-    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-
-  // ── Config Firebase ────────────────────────────────────────────────────────
-  const firebaseConfig = {
-    apiKey:            "AIzaSyAsC0ossvmk72Ewt2KBsFwYOjmZ4En_CN8",
-    authDomain:        "cyap-66.firebaseapp.com",
-    projectId:         "cyap-66",
-    storageBucket:     "cyap-66.firebasestorage.app",
-    messagingSenderId: "645856550801",
-    appId:             "1:645856550801:web:b53033f2be6c77f0f28430"
-  };
-
-  const app  = initializeApp(firebaseConfig);
-  const db   = getFirestore(app);
-  const auth = getAuth(app);
-  const provider = new GoogleAuthProvider();
-
-  // ── Constantes ─────────────────────────────────────────────────────────────
-  const MACHINES = [1, 2, 3];
-  const MACHINE_NAMES  = { 1: "Central (M1)", 2: "Nodo 2 (M2)", 3: "Nodo 3 (M3)" };
-  const MACHINE_COLORS = { 1: "#00E5FF",       2: "#69FF47",      3: "#FF6B35" };
-
-  let allEvents = [];
-  let charts    = {};
-  let unsubscribe = null;
-
-  // ── Auth ───────────────────────────────────────────────────────────────────
-  window.loginGoogle = async () => {
-    try {
-      await signInWithPopup(auth, provider);
-    } catch(e) {
-      showToast("Error al iniciar sesión", "error");
-      console.error(e);
-    }
-  };
-
-  window.logoutUser = async () => {
-    if (unsubscribe) { unsubscribe(); unsubscribe = null; }
-    await signOut(auth);
-  };
-
-  onAuthStateChanged(auth, user => {
-    if (user) {
-      document.getElementById("login-screen").style.display  = "none";
-      document.getElementById("app-screen").style.display    = "block";
-      document.getElementById("user-name").textContent       = user.displayName || user.email;
-      document.getElementById("user-avatar").src             = user.photoURL || "";
-      document.getElementById("user-avatar").style.display   = user.photoURL ? "block" : "none";
-      startListener();
-    } else {
-      document.getElementById("login-screen").style.display  = "flex";
-      document.getElementById("app-screen").style.display    = "none";
-      allEvents = [];
-      charts    = {};
-    }
-  });
-
-  // ── Listener Firestore ─────────────────────────────────────────────────────
-  function startListener() {
-    const q = query(collection(db, "pulsos"), orderBy("timestamp", "asc"));
-    unsubscribe = onSnapshot(q, snap => {
-      allEvents = snap.docs.map(doc => {
-        const d  = doc.data();
-        const ts = d.timestamp ? d.timestamp.toDate() : new Date();
-        return { machine_id: d.machine_id, ts };
-      });
-      rebuildAll();
-    });
-  }
-
-  // ── Test button (simular pulso) ────────────────────────────────────────────
-  window.pushEvent = async (id) => {
-    try {
-      await addDoc(collection(db, "pulsos"), { machine_id: id, timestamp: serverTimestamp() });
-    } catch(e) {
-      showToast("Error al guardar", "error");
-    }
-  };
-
-  // ── UI rebuild ─────────────────────────────────────────────────────────────
-  function rebuildAll() {
-    updateCounters();
-    updateLastEvents();
-    buildHourChart();
-    buildDayChart();
-    buildMonthChart();
-    buildGeneralChart();
-    buildTable();
-  }
-
-  function updateCounters() {
-    const today = todayStr();
-    MACHINES.forEach(id => {
-      const c = allEvents.filter(e => e.machine_id === id && dateStr(e.ts) === today).length;
-      const el = document.getElementById(`count-${id}`);
-      if (el) el.textContent = c;
-    });
-    const tot = allEvents.filter(e => dateStr(e.ts) === todayStr()).length;
-    const el  = document.getElementById("count-total");
-    if (el) el.textContent = tot;
-  }
-
-  function updateLastEvents() {
-    MACHINES.forEach(id => {
-      const evs  = allEvents.filter(e => e.machine_id === id);
-      const last = evs[evs.length - 1];
-      const el   = document.getElementById(`last-${id}`);
-      if (el) el.textContent = last ? formatTime(last.ts) : "--:--:--";
-    });
-  }
-
-  function buildHourChart() {
-    const today  = todayStr();
-    const labels = Array.from({length: 24}, (_, i) => `${String(i).padStart(2,"0")}h`);
-    const datasets = MACHINES.map(id => ({
-      label: MACHINE_NAMES[id],
-      data: labels.map((_, h) =>
-        allEvents.filter(e => e.machine_id===id && dateStr(e.ts)===today && e.ts.getHours()===h).length
-      ),
-      backgroundColor: MACHINE_COLORS[id] + "99",
-      borderColor:     MACHINE_COLORS[id],
-      borderWidth: 2, borderRadius: 4,
-    }));
-    renderChart("chartHour", "bar", labels, datasets);
-  }
-
-  function buildDayChart() {
-    const days = last30Days();
-    const datasets = MACHINES.map(id => ({
-      label: MACHINE_NAMES[id],
-      data: days.map(d => allEvents.filter(e => e.machine_id===id && dateStr(e.ts)===d).length),
-      borderColor: MACHINE_COLORS[id], backgroundColor: MACHINE_COLORS[id]+"33",
-      borderWidth: 2, tension: 0.4, fill: false, pointRadius: 3,
-    }));
-    renderChart("chartDay", "line", days.map(d => d.slice(5)), datasets);
-  }
-
-  function buildMonthChart() {
-    const year   = new Date().getFullYear();
-    const months = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
-    const datasets = MACHINES.map(id => ({
-      label: MACHINE_NAMES[id],
-      data: months.map((_, m) =>
-        allEvents.filter(e => e.machine_id===id && e.ts.getFullYear()===year && e.ts.getMonth()===m).length
-      ),
-      backgroundColor: MACHINE_COLORS[id]+"BB", borderColor: MACHINE_COLORS[id],
-      borderWidth: 2, borderRadius: 6,
-    }));
-    renderChart("chartMonth", "bar", months, datasets);
-  }
-
-  function buildGeneralChart() {
-    const days = last30Days();
-    const datasets = [{
-      label: "Total planta",
-      data: days.map(d => allEvents.filter(e => dateStr(e.ts)===d).length),
-      borderColor: "#00E5FF", backgroundColor: "rgba(0,229,255,0.12)",
-      borderWidth: 3, tension: 0.4, fill: true, pointRadius: 4,
-      pointBackgroundColor: "#00E5FF",
-    }];
-    renderChart("chartGeneral", "line", days.map(d => d.slice(5)), datasets);
-  }
-
-  function buildTable() {
-    const tbody = document.getElementById("tbody");
-    if (!tbody) return;
-    const recent = [...allEvents].reverse().slice(0, 100);
-    if (!recent.length) {
-      tbody.innerHTML = `<tr><td colspan="3" class="empty-cell">Sin eventos registrados aún</td></tr>`;
-      return;
-    }
-    tbody.innerHTML = recent.map((e, i) => `
-      <tr style="animation-delay:${i*0.02}s">
-        <td>${formatDateTime(e.ts)}</td>
-        <td><span class="badge" style="background:${MACHINE_COLORS[e.machine_id]}18;color:${MACHINE_COLORS[e.machine_id]};border:1px solid ${MACHINE_COLORS[e.machine_id]}44">${MACHINE_NAMES[e.machine_id] ?? "—"}</span></td>
-        <td class="td-ago">${timeAgo(e.ts)}</td>
-      </tr>`).join("");
-  }
-
-  function renderChart(id, type, labels, datasets) {
-    const canvas = document.getElementById(id);
-    if (!canvas) return;
-    const opts = {
-      responsive: true, maintainAspectRatio: false, animation: { duration: 300 },
-      plugins: {
-        legend: { labels: { color: "#666", font: { family: "JetBrains Mono", size: 10 } } },
-        tooltip: {
-          backgroundColor: "#0e0e0e", borderColor: "#2a2a30", borderWidth: 1,
-          titleColor: "#e1e1e6", bodyColor: "#888",
-          titleFont: { family: "JetBrains Mono" }, bodyFont: { family: "JetBrains Mono" },
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CYAP | Monitor de Producción</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-base: #0c0c0f;
+            --bg-card: #1a1a1e;
+            --bg-header: #121214;
+            --border-color: #2a2a30;
+            --text-main: #e1e1e6;
+            --text-muted: #a1a1aa;
+            --accent-m1: #3b82f6; /* Azul medio */
+            --accent-m2: #10b981; /* Verde apagado */
+            --accent-m3: #d97706; /* Naranja oscuro */
+            --accent-general: #6366f1;
         }
-      },
-      scales: {
-        x: { ticks: { color: "#444", font: { family: "JetBrains Mono", size: 9 } }, grid: { color: "#181818" } },
-        y: { ticks: { color: "#444", font: { family: "JetBrains Mono", size: 9 } }, grid: { color: "#181818" }, beginAtZero: true }
-      }
-    };
-    if (charts[id]) {
-      charts[id].data.labels   = labels;
-      charts[id].data.datasets = datasets;
-      charts[id].update("none");
-    } else {
-      charts[id] = new Chart(canvas, { type, data: { labels, datasets }, options: opts });
-    }
-  }
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
-  function todayStr()       { return dateStr(new Date()); }
-  function dateStr(d)       { return d.toISOString().slice(0,10); }
-  function pad(n)           { return String(n).padStart(2,"0"); }
-  function formatTime(d)    { return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; }
-  function formatDateTime(d){ return `${dateStr(d)} ${formatTime(d)}`; }
-  function last30Days() {
-    return Array.from({length:30},(_,i) => {
-      const d = new Date(); d.setDate(d.getDate()-29+i); return dateStr(d);
-    });
-  }
-  function timeAgo(d) {
-    const s = Math.floor((Date.now()-d)/1000);
-    if (s < 60)   return `${s}s`;
-    if (s < 3600) return `${Math.floor(s/60)}m`;
-    return `${Math.floor(s/3600)}h`;
-  }
-  function showToast(msg, type="ok") {
-    const t = document.getElementById("toast");
-    t.textContent = msg;
-    t.className   = "toast show " + type;
-    setTimeout(() => t.className = "toast", 3000);
-  }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background-color: var(--bg-base); color: var(--text-main); font-family: 'JetBrains Mono', monospace; line-height: 1.5; }
+        h1, h2, h3, .title-font { font-family: 'Syne', sans-serif; }
 
-  // ── Reloj ──────────────────────────────────────────────────────────────────
-  function tick() {
-    const el = document.getElementById("clock");
-    if (el) el.textContent = new Date().toLocaleTimeString("es-AR", {hour12:false});
-  }
-  setInterval(tick, 1000); tick();
-</script>
+        /* Login Screen */
+        #login-screen {
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            background-color: var(--bg-base); display: flex; flex-direction: column;
+            align-items: center; justify-content: center; z-index: 1000;
+        }
+        .login-card {
+            background: var(--bg-card); padding: 3rem; border: 1px solid var(--border-color);
+            border-radius: 8px; text-align: center; max-width: 400px;
+        }
+        .login-card h1 { font-size: 2rem; margin-bottom: 1rem; color: var(--text-main); }
+        .login-card p { color: var(--text-muted); margin-bottom: 2rem; }
+        .btn-google {
+            background: #ffffff; color: #000000; font-family: 'Syne', sans-serif; font-weight: 600;
+            padding: 12px 24px; border: none; border-radius: 4px; cursor: pointer;
+            display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; transition: opacity 0.2s;
+        }
+        .btn-google:hover { opacity: 0.9; }
 
-<style>
-  :root {
-    --bg:     #0c0c0f;
-    --bg2:    #121214;
-    --bg3:    #1a1a1e;
-    --border: #2a2a30;
-    --text:   #e1e1e6;
-    --muted:  #555;
-    --accent: #00E5FF;
-    --m1:     #00E5FF;
-    --m2:     #69FF47;
-    --m3:     #FF6B35;
-    --font-mono: 'JetBrains Mono', monospace;
-    --font-disp: 'Syne', sans-serif;
-  }
+        /* Dashboard */
+        #dashboard { display: none; padding-bottom: 4rem; }
+        header {
+            background: var(--bg-header); border-bottom: 1px solid var(--border-color);
+            padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center;
+        }
+        .header-left { display: flex; align-items: center; gap: 20px; }
+        .brand { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.5px; }
+        .clock { color: var(--text-muted); font-size: 0.9rem; }
+        .status-dot { width: 10px; height: 10px; background-color: var(--accent-m2); border-radius: 50%; box-shadow: 0 0 8px var(--accent-m2); animation: pulse 2s infinite; }
+        
+        .user-profile { display: flex; align-items: center; gap: 15px; }
+        .user-profile img { width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border-color); }
+        .btn-logout { background: transparent; border: 1px solid var(--border-color); color: var(--text-muted); padding: 6px 12px; cursor: pointer; border-radius: 4px; font-family: 'JetBrains Mono', monospace; }
 
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 2rem; }
+        .section-title { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 2px; color: var(--text-muted); margin-bottom: 1.5rem; display: flex; align-items: center; gap: 15px; }
+        .section-title::after { content: ''; flex: 1; height: 1px; background: var(--border-color); }
+        .section { margin-bottom: 4rem; }
 
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font-mono);
-    min-height: 100vh;
-    overflow-x: hidden;
-  }
+        /* Cards Grid */
+        .cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem; }
+        .card { background: var(--bg-card); border: 1px solid var(--border-color); padding: 1.5rem; border-radius: 6px; position: relative; overflow: hidden; }
+        .card::before { content: ''; position: absolute; top: 0; left: 0; width: 4px; height: 100%; }
+        .card.total::before { background: var(--accent-general); }
+        .card.m1::before { background: var(--accent-m1); }
+        .card.m2::before { background: var(--accent-m2); }
+        .card.m3::before { background: var(--accent-m3); }
+        
+        .card-title { color: var(--text-muted); font-size: 0.8rem; text-transform: uppercase; }
+        .card-value { font-family: 'Syne', sans-serif; font-size: 2.5rem; font-weight: 800; margin: 10px 0; }
+        .card-meta { font-size: 0.75rem; color: var(--text-muted); }
 
-  /* ── LOGIN SCREEN ── */
-  #login-screen {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    min-height: 100vh;
-    padding: 24px;
-    gap: 0;
-  }
+        /* Charts Grid */
+        .charts-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.5rem; }
+        .chart-container { background: var(--bg-card); border: 1px solid var(--border-color); padding: 1.5rem; border-radius: 6px; height: 300px; }
 
-  .login-card {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 48px 40px;
-    width: 100%;
-    max-width: 400px;
-    text-align: center;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 24px;
-  }
+        /* Table */
+        .table-container { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 6px; overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; text-align: left; }
+        th { background: var(--bg-header); padding: 1rem; font-size: 0.8rem; text-transform: uppercase; color: var(--text-muted); border-bottom: 1px solid var(--border-color); }
+        td { padding: 1rem; border-bottom: 1px solid var(--border-color); font-size: 0.9rem; }
+        tr:last-child td { border-bottom: none; }
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; }
+        .badge.m1 { background: rgba(59, 130, 246, 0.1); color: var(--accent-m1); border: 1px solid var(--accent-m1); }
+        .badge.m2 { background: rgba(16, 185, 129, 0.1); color: var(--accent-m2); border: 1px solid var(--accent-m2); }
+        .badge.m3 { background: rgba(217, 119, 6, 0.1); color: var(--accent-m3); border: 1px solid var(--accent-m3); }
 
-  .login-logo {
-    font-family: var(--font-disp);
-    font-size: 2rem;
-    font-weight: 800;
-    letter-spacing: -1px;
-    color: #fff;
-  }
-
-  .login-logo span { color: var(--accent); }
-
-  .login-subtitle {
-    font-size: 0.72rem;
-    letter-spacing: 3px;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-top: -16px;
-  }
-
-  .login-divider {
-    width: 40px;
-    height: 1px;
-    background: var(--border);
-  }
-
-  .login-desc {
-    font-size: 0.78rem;
-    color: #666;
-    line-height: 1.6;
-  }
-
-  .btn-google {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 13px 24px;
-    background: var(--bg3);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: 0.8rem;
-    cursor: pointer;
-    transition: border-color 0.2s, background 0.2s;
-    width: 100%;
-    justify-content: center;
-  }
-
-  .btn-google:hover { border-color: #444; background: #1e1e22; }
-
-  .btn-google svg { flex-shrink: 0; }
-
-  /* ── APP SCREEN ── */
-  #app-screen { display: none; }
-
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 16px 32px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg);
-    position: sticky;
-    top: 0;
-    z-index: 100;
-    gap: 12px;
-  }
-
-  .logo {
-    font-family: var(--font-disp);
-    font-size: 1.3rem;
-    font-weight: 800;
-    letter-spacing: -0.5px;
-    color: #fff;
-    white-space: nowrap;
-  }
-
-  .logo span { color: var(--accent); }
-
-  .header-right {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    min-width: 0;
-  }
-
-  #clock {
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--accent);
-    letter-spacing: 2px;
-    white-space: nowrap;
-  }
-
-  .status-dot {
-    width: 7px; height: 7px;
-    border-radius: 50%;
-    background: #22c55e;
-    box-shadow: 0 0 6px #22c55e;
-    animation: pulse 2s infinite;
-    flex-shrink: 0;
-  }
-
-  .user-info {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .user-info img {
-    width: 28px; height: 28px;
-    border-radius: 50%;
-    border: 1px solid var(--border);
-    display: none;
-    flex-shrink: 0;
-  }
-
-  #user-name {
-    font-size: 0.72rem;
-    color: var(--muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 160px;
-  }
-
-  .btn-logout {
-    padding: 6px 14px;
-    background: transparent;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--muted);
-    font-family: var(--font-mono);
-    font-size: 0.68rem;
-    cursor: pointer;
-    transition: all 0.15s;
-    white-space: nowrap;
-    flex-shrink: 0;
-    letter-spacing: 1px;
-  }
-
-  .btn-logout:hover { border-color: #444; color: var(--text); }
-
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-
-  main { padding: 28px 32px; max-width: 1400px; margin: 0 auto; }
-
-  section { margin-bottom: 40px; }
-
-  .section-title {
-    font-family: var(--font-disp);
-    font-size: 0.62rem;
-    font-weight: 600;
-    letter-spacing: 4px;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-bottom: 16px;
-    padding-bottom: 8px;
-    border-bottom: 1px solid var(--border);
-  }
-
-  /* ── CARDS ── */
-  .cards-grid {
-    display: grid;
-    grid-template-columns: 1.4fr 1fr 1fr 1fr;
-    gap: 12px;
-  }
-
-  .card {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 20px 18px;
-    transition: border-color 0.2s;
-  }
-
-  .card:hover { border-color: #3a3a42; }
-
-  .card.total {
-    border-color: rgba(0,229,255,0.3);
-    background: rgba(0,229,255,0.03);
-  }
-
-  .card-label {
-    font-size: 0.62rem;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-bottom: 12px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .card-dot {
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .card-count {
-    font-family: var(--font-disp);
-    font-size: 2.6rem;
-    font-weight: 800;
-    line-height: 1;
-    color: #fff;
-  }
-
-  .card.total .card-count { color: var(--accent); }
-
-  .card-last {
-    font-size: 0.62rem;
-    color: var(--muted);
-    margin-top: 10px;
-  }
-
-  /* ── TEST BUTTONS ── */
-  .test-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
-  }
-
-  .btn-test {
-    padding: 12px;
-    border: 1px solid var(--border);
-    background: var(--bg3);
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    border-radius: 8px;
-    cursor: pointer;
-    transition: all 0.15s;
-    letter-spacing: 1px;
-  }
-
-  .btn-test:hover  { transform: translateY(-2px); border-color: #3a3a42; }
-  .btn-test:active { transform: translateY(0); background: var(--bg2); }
-
-  /* ── CHARTS ── */
-  .charts-2col {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 14px;
-    margin-bottom: 14px;
-  }
-
-  .chart-box {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 20px;
-  }
-
-  .chart-title {
-    font-size: 0.6rem;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-bottom: 14px;
-  }
-
-  .chart-wrap { height: 210px; position: relative; }
-
-  /* ── TABLE ── */
-  .table-wrap {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    overflow: hidden;
-  }
-
-  table { width: 100%; border-collapse: collapse; }
-
-  thead tr { background: var(--bg3); border-bottom: 1px solid var(--border); }
-
-  th {
-    padding: 12px 16px;
-    text-align: left;
-    font-size: 0.6rem;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    color: var(--muted);
-    font-weight: 400;
-  }
-
-  tbody tr {
-    border-bottom: 1px solid var(--border);
-    transition: background 0.15s;
-    animation: fadeIn 0.3s ease both;
-  }
-
-  tbody tr:hover { background: var(--bg3); }
-  tbody tr:last-child { border-bottom: none; }
-
-  td {
-    padding: 10px 16px;
-    font-size: 0.72rem;
-    color: #888;
-  }
-
-  td.td-ago { color: #444; font-size: 0.68rem; }
-
-  .empty-cell { text-align: center; color: #333; padding: 40px; }
-
-  @keyframes fadeIn {
-    from { opacity:0; transform:translateY(4px); }
-    to   { opacity:1; transform:translateY(0); }
-  }
-
-  .badge {
-    padding: 3px 10px;
-    border-radius: 20px;
-    font-size: 0.62rem;
-    letter-spacing: 1px;
-    font-weight: 600;
-  }
-
-  /* ── TOAST ── */
-  .toast {
-    position: fixed;
-    bottom: 24px; right: 24px;
-    padding: 12px 20px;
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    font-size: 0.72rem;
-    color: #888;
-    opacity: 0;
-    transform: translateY(10px);
-    transition: all 0.3s;
-    z-index: 999;
-    pointer-events: none;
-  }
-
-  .toast.show { opacity:1; transform:translateY(0); }
-  .toast.error { border-color: #ef4444; color: #ef4444; }
-
-  /* ── RESPONSIVE ── */
-  @media (max-width: 900px) {
-    .cards-grid  { grid-template-columns: 1fr 1fr; }
-    .charts-2col { grid-template-columns: 1fr; }
-  }
-
-  @media (max-width: 600px) {
-    main   { padding: 16px; }
-    header { padding: 12px 16px; }
-    #clock { display: none; }
-    #user-name { max-width: 100px; }
-    .cards-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
-    .card-count { font-size: 2rem; }
-    .test-grid  { grid-template-columns: 1fr 1fr 1fr; }
-    .login-card { padding: 36px 24px; }
-  }
-</style>
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(16, 185, 129, 0); } 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); } }
+        @media (max-width: 1024px) { .charts-grid { grid-template-columns: 1fr; } }
+    </style>
 </head>
 <body>
 
-<!-- ── LOGIN ────────────────────────────────────────────────────────────────── -->
-<div id="login-screen">
-  <div class="login-card">
-    <div class="login-logo">CY<span>AP</span></div>
-    <div class="login-subtitle">Sistema de Producción</div>
-    <div class="login-divider"></div>
-    <p class="login-desc">Accedé al panel de control en tiempo real. Solo personal autorizado.</p>
-    <button class="btn-google" onclick="loginGoogle()">
-      <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-        <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>
-        <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z" fill="#34A853"/>
-        <path d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05"/>
-        <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
-      </svg>
-      Continuar con Google
-    </button>
-  </div>
-</div>
-
-<!-- ── APP ──────────────────────────────────────────────────────────────────── -->
-<div id="app-screen">
-
-  <header>
-    <div class="logo">CY<span>AP</span></div>
-    <div class="header-right">
-      <span id="clock">--:--:--</span>
-      <div class="status-dot" title="Firebase conectado"></div>
-      <div class="user-info">
-        <img id="user-avatar" src="" alt="avatar">
-        <span id="user-name"></span>
-      </div>
-      <button class="btn-logout" onclick="logoutUser()">Salir</button>
+    <div id="login-screen">
+        <div class="login-card">
+            <h1 class="title-font">CYAP</h1>
+            <p>Sistema de Monitoreo de Producción Industrial.</p>
+            <button class="btn-google" id="btn-login">
+                <img src="https://www.google.com/favicon.ico" alt="Google" width="18"> Continuar con Google
+            </button>
+        </div>
     </div>
-  </header>
 
-  <main>
+    <div id="dashboard">
+        <header>
+            <div class="header-left">
+                <div class="brand title-font">CYAP_SYS</div>
+                <div class="status-dot" title="Firebase Conectado"></div>
+                <div class="clock" id="live-clock">--:--:--</div>
+            </div>
+            <div class="user-profile">
+                <span id="user-name" style="font-size: 0.9rem;"></span>
+                <img id="user-photo" src="" alt="User" style="display: none;">
+                <button class="btn-logout" id="btn-logout">Cerrar Sesión</button>
+            </div>
+        </header>
 
-    <!-- ── Contadores ─────────────────────────────────────────────────────── -->
-    <section>
-      <div class="section-title">Producción de hoy</div>
-      <div class="cards-grid">
+        <div class="container">
+            <div class="section">
+                <h2 class="section-title title-font">Resumen del Día</h2>
+                <div class="cards-grid">
+                    <div class="card total">
+                        <div class="card-title">Total Planta (Hoy)</div>
+                        <div class="card-value" id="val-total">0</div>
+                        <div class="card-meta">Último: <span id="time-total">--</span></div>
+                    </div>
+                    <div class="card m1">
+                        <div class="card-title">Máquina 1 (Central)</div>
+                        <div class="card-value" id="val-m1">0</div>
+                        <div class="card-meta">Último: <span id="time-m1">--</span></div>
+                    </div>
+                    <div class="card m2">
+                        <div class="card-title">Máquina 2 (Nodo 2)</div>
+                        <div class="card-value" id="val-m2">0</div>
+                        <div class="card-meta">Último: <span id="time-m2">--</span></div>
+                    </div>
+                    <div class="card m3">
+                        <div class="card-title">Máquina 3 (Nodo 3)</div>
+                        <div class="card-value" id="val-m3">0</div>
+                        <div class="card-meta">Último: <span id="time-m3">--</span></div>
+                    </div>
+                </div>
+            </div>
 
-        <div class="card total">
-          <div class="card-label">Total planta</div>
-          <div class="card-count" id="count-total">0</div>
-          <div class="card-last">3 nodos activos</div>
+            <div class="section">
+                <h2 class="section-title title-font">Análisis Gráfico</h2>
+                <div class="charts-grid">
+                    <div class="chart-container"><canvas id="chart-hourly"></canvas></div>
+                    <div class="chart-container"><canvas id="chart-daily"></canvas></div>
+                    <div class="chart-container"><canvas id="chart-monthly"></canvas></div>
+                    <div class="chart-container"><canvas id="chart-total"></canvas></div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2 class="section-title title-font">Historial de Eventos (Últimos 100)</h2>
+                <div class="table-container">
+                    <table>
+                        <thead><tr><th>Fecha y Hora</th><th>Origen</th><th>Máquina</th><th>Hace...</th></tr></thead>
+                        <tbody id="table-body"></tbody>
+                    </table>
+                </div>
+            </div>
         </div>
+    </div>
 
-        <div class="card">
-          <div class="card-label"><span class="card-dot" style="background:var(--m1)"></span>Central M1</div>
-          <div class="card-count" id="count-1">0</div>
-          <div class="card-last">último: <span id="last-1">--:--:--</span></div>
-        </div>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
+        import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
+        import { getFirestore, collection, query, orderBy, limit, onSnapshot, where } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
 
-        <div class="card">
-          <div class="card-label"><span class="card-dot" style="background:var(--m2)"></span>Nodo 2 (M2)</div>
-          <div class="card-count" id="count-2">0</div>
-          <div class="card-last">último: <span id="last-2">--:--:--</span></div>
-        </div>
+        const firebaseConfig = {
+            apiKey: "AIzaSyAsC0ossvmk72Ewt2KBsFwYOjmZ4En_CN8",
+            authDomain: "cyap-66.firebaseapp.com",
+            projectId: "cyap-66",
+            storageBucket: "cyap-66.firebasestorage.app",
+            messagingSenderId: "645856550801",
+            appId: "1:645856550801:web:b53033f2be6c77f0f28430"
+        };
 
-        <div class="card">
-          <div class="card-label"><span class="card-dot" style="background:var(--m3)"></span>Nodo 3 (M3)</div>
-          <div class="card-count" id="count-3">0</div>
-          <div class="card-last">último: <span id="last-3">--:--:--</span></div>
-        </div>
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        let unsubscribeFirestore = null;
 
-      </div>
-    </section>
+        // UI Elements
+        const loginScreen = document.getElementById('login-screen');
+        const dashboard = document.getElementById('dashboard');
+        const btnLogin = document.getElementById('btn-login');
+        const btnLogout = document.getElementById('btn-logout');
 
-    <!-- ── Botones de prueba ──────────────────────────────────────────────── -->
-    <section>
-      <div class="section-title">Simular pulso manual</div>
-      <div class="test-grid">
-        <button class="btn-test" onclick="pushEvent(1)">+ M1 Central</button>
-        <button class="btn-test" onclick="pushEvent(2)">+ M2 Nodo 2</button>
-        <button class="btn-test" onclick="pushEvent(3)">+ M3 Nodo 3</button>
-      </div>
-    </section>
+        // Reloj en vivo
+        setInterval(() => {
+            const now = new Date();
+            document.getElementById('live-clock').innerText = now.toLocaleTimeString('es-AR', { hour12: false });
+        }, 1000);
 
-    <!-- ── Gráficos ───────────────────────────────────────────────────────── -->
-    <section>
-      <div class="section-title">Análisis de producción</div>
+        // Setup Charts Global Theme
+        Chart.defaults.color = '#a1a1aa';
+        Chart.defaults.font.family = "'JetBrains Mono', monospace";
+        Chart.defaults.borderColor = '#2a2a30';
 
-      <div class="charts-2col">
-        <div class="chart-box">
-          <div class="chart-title">Por hora — hoy</div>
-          <div class="chart-wrap"><canvas id="chartHour"></canvas></div>
-        </div>
-        <div class="chart-box">
-          <div class="chart-title">General — últimos 30 días</div>
-          <div class="chart-wrap"><canvas id="chartGeneral"></canvas></div>
-        </div>
-      </div>
+        const chartHourlyCtx = document.getElementById('chart-hourly').getContext('2d');
+        const chartDailyCtx = document.getElementById('chart-daily').getContext('2d');
+        const chartMonthlyCtx = document.getElementById('chart-monthly').getContext('2d');
+        const chartTotalCtx = document.getElementById('chart-total').getContext('2d');
 
-      <div class="charts-2col">
-        <div class="chart-box">
-          <div class="chart-title">Por día — últimos 30 días</div>
-          <div class="chart-wrap"><canvas id="chartDay"></canvas></div>
-        </div>
-        <div class="chart-box">
-          <div class="chart-title">Por mes — año actual</div>
-          <div class="chart-wrap"><canvas id="chartMonth"></canvas></div>
-        </div>
-      </div>
-    </section>
+        // Instancias vacías de gráficos
+        let chartHourly = new Chart(chartHourlyCtx, { type: 'bar', data: { labels: [], datasets: [] }, options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: 'Producción por Hora (Hoy)', color: '#e1e1e6' } } } });
+        let chartDaily = new Chart(chartDailyCtx, { type: 'line', data: { labels: [], datasets: [] }, options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: 'Producción Diaria (Últimos 30 días)', color: '#e1e1e6' } } } });
+        let chartMonthly = new Chart(chartMonthlyCtx, { type: 'bar', data: { labels: [], datasets: [] }, options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: 'Producción Mensual', color: '#e1e1e6' } } } });
+        let chartTotal = new Chart(chartTotalCtx, { type: 'doughnut', data: { labels: [], datasets: [] }, options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: 'Distribución Total Planta', color: '#e1e1e6' } }, cutout: '70%' } });
 
-    <!-- ── Tabla ──────────────────────────────────────────────────────────── -->
-    <section>
-      <div class="section-title">Últimos 100 eventos</div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Fecha y hora</th>
-              <th>Máquina</th>
-              <th>Hace</th>
-            </tr>
-          </thead>
-          <tbody id="tbody">
-            <tr><td colspan="3" class="empty-cell">Esperando datos...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+        // Auth Logic
+        btnLogin.addEventListener('click', () => { signInWithPopup(auth, new GoogleAuthProvider()); });
+        btnLogout.addEventListener('click', () => { signOut(auth); });
 
-  </main>
-</div>
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                loginScreen.style.display = 'none';
+                dashboard.style.display = 'block';
+                document.getElementById('user-name').innerText = user.displayName;
+                document.getElementById('user-photo').src = user.photoURL;
+                document.getElementById('user-photo').style.display = 'block';
+                startListening();
+            } else {
+                loginScreen.style.display = 'flex';
+                dashboard.style.display = 'none';
+                if (unsubscribeFirestore) unsubscribeFirestore();
+            }
+        });
 
-<div class="toast" id="toast"></div>
+        // Funciones de procesamiento de datos
+        function formatTimeAgo(date) {
+            const seconds = Math.floor((new Date() - date) / 1000);
+            if (seconds < 60) return "Hace instantes";
+            const minutes = Math.floor(seconds / 60);
+            if (minutes < 60) return `Hace ${minutes} min`;
+            const hours = Math.floor(minutes / 60);
+            if (hours < 24) return `Hace ${hours} h`;
+            return `Hace ${Math.floor(hours / 24)} días`;
+        }
 
+        function getMachineData(id) {
+            if (id === 1) return { name: "Central", class: "m1" };
+            if (id === 2) return { name: "Nodo 2", class: "m2" };
+            if (id === 3) return { name: "Nodo 3", class: "m3" };
+            return { name: `Desc ${id}`, class: "" };
+        }
+
+        function startListening() {
+            const q = query(collection(db, "pulsos"), orderBy("timestamp", "desc"), limit(1000)); // Traemos más para gráficos
+            
+            unsubscribeFirestore = onSnapshot(q, (snapshot) => {
+                const now = new Date();
+                const todayStr = now.toLocaleDateString('es-AR');
+                
+                let countsToday = { total: 0, m1: 0, m2: 0, m3: 0 };
+                let lastTimes = { total: null, m1: null, m2: null, m3: null };
+                
+                let tableHTML = "";
+                let eventsCount = 0;
+
+                // Estructuras para gráficos
+                let hourlyData = Array(24).fill(0);
+                let dailyDataM1 = {}; let dailyDataM2 = {}; let dailyDataM3 = {};
+                let monthlyDataM1 = Array(12).fill(0); let monthlyDataM2 = Array(12).fill(0); let monthlyDataM3 = Array(12).fill(0);
+
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    if (!data.timestamp) return;
+                    const date = data.timestamp.toDate();
+                    const dateStr = date.toLocaleDateString('es-AR');
+                    const mId = data.machine_id;
+
+                    // Lógica para Tarjetas (Solo Hoy)
+                    if (dateStr === todayStr) {
+                        countsToday.total++;
+                        if (mId === 1) countsToday.m1++;
+                        if (mId === 2) countsToday.m2++;
+                        if (mId === 3) countsToday.m3++;
+                        
+                        hourlyData[date.getHours()]++; // Para gráfico horario
+                    }
+
+                    // Lógica Última vez
+                    if (!lastTimes.total) lastTimes.total = date;
+                    if (mId === 1 && !lastTimes.m1) lastTimes.m1 = date;
+                    if (mId === 2 && !lastTimes.m2) lastTimes.m2 = date;
+                    if (mId === 3 && !lastTimes.m3) lastTimes.m3 = date;
+
+                    // Lógica Gráficos (Mes y Día)
+                    if (date.getFullYear() === now.getFullYear()) {
+                        if (mId === 1) monthlyDataM1[date.getMonth()]++;
+                        if (mId === 2) monthlyDataM2[date.getMonth()]++;
+                        if (mId === 3) monthlyDataM3[date.getMonth()]++;
+                    }
+
+                    // Lógica Tabla (Solo 100)
+                    if (eventsCount < 100) {
+                        const mInfo = getMachineData(mId);
+                        tableHTML += `<tr>
+                            <td>${dateStr} - ${date.toLocaleTimeString('es-AR')}</td>
+                            <td>ESP32</td>
+                            <td><span class="badge ${mInfo.class}">M${mId} - ${mInfo.name}</span></td>
+                            <td style="color: var(--text-muted)">${formatTimeAgo(date)}</td>
+                        </tr>`;
+                        eventsCount++;
+                    }
+                });
+
+                // Actualizar DOM Tarjetas
+                document.getElementById('val-total').innerText = countsToday.total;
+                document.getElementById('val-m1').innerText = countsToday.m1;
+                document.getElementById('val-m2').innerText = countsToday.m2;
+                document.getElementById('val-m3').innerText = countsToday.m3;
+
+                document.getElementById('time-total').innerText = lastTimes.total ? lastTimes.total.toLocaleTimeString('es-AR', {hour: '2-digit', minute:'2-digit'}) : '--';
+                document.getElementById('time-m1').innerText = lastTimes.m1 ? lastTimes.m1.toLocaleTimeString('es-AR', {hour: '2-digit', minute:'2-digit'}) : '--';
+                document.getElementById('time-m2').innerText = lastTimes.m2 ? lastTimes.m2.toLocaleTimeString('es-AR', {hour: '2-digit', minute:'2-digit'}) : '--';
+                document.getElementById('time-m3').innerText = lastTimes.m3 ? lastTimes.m3.toLocaleTimeString('es-AR', {hour: '2-digit', minute:'2-digit'}) : '--';
+
+                document.getElementById('table-body').innerHTML = tableHTML;
+
+                // Actualizar Gráficos
+                updateCharts(hourlyData, monthlyDataM1, monthlyDataM2, monthlyDataM3, countsToday);
+            });
+        }
+
+        function updateCharts(hourly, month1, month2, month3, totals) {
+            chartHourly.data = { labels: Array.from({length: 24}, (_, i) => `${i}h`), datasets: [{ label: 'Pulsos', data: hourly, backgroundColor: '#6366f1', borderRadius: 4 }] };
+            chartHourly.update();
+
+            const months = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+            chartMonthly.data = { labels: months, datasets: [
+                { label: 'M1', data: month1, backgroundColor: '#3b82f6' },
+                { label: 'M2', data: month2, backgroundColor: '#10b981' },
+                { label: 'M3', data: month3, backgroundColor: '#d97706' }
+            ]};
+            chartMonthly.update();
+
+            chartTotal.data = { labels: ['Máquina 1', 'Máquina 2', 'Máquina 3'], datasets: [{ data: [totals.m1, totals.m2, totals.m3], backgroundColor: ['#3b82f6', '#10b981', '#d97706'], borderWidth: 0 }] };
+            chartTotal.update();
+        }
+    </script>
 </body>
 </html>
